@@ -308,3 +308,283 @@ fn health_is_available_on_configured_listener() {
         200
     );
 }
+
+fn deliver_event(app: &Harness, event: &str, payload: &serde_json::Value) -> u16 {
+    let body = payload.to_string();
+    app.request(
+        "/gitea",
+        body.as_bytes(),
+        Some(&support::signature(body.as_bytes())),
+        event,
+    )
+}
+
+#[test]
+fn pull_requests_preserve_source_title_author_and_link_and_mark_closure() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    let mut payload: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/pull_request_opened.json")).unwrap();
+    assert_eq!(deliver_event(&app, "pull_request", &payload), 204);
+    assert_eq!(
+        app.messages()[0]["text"]["content"],
+        "[karoyqiu/gitea-ntfy] PR #42 已创建: Add webhook support\nAdd webhook support，作者：roy\nhttps://gitea.example.com/karoyqiu/gitea-ntfy/pulls/42"
+    );
+    payload =
+        serde_json::from_str(include_str!("fixtures/pull_request_closed_not_merged.json")).unwrap();
+    assert_eq!(deliver_event(&app, "pull_request", &payload), 204);
+    assert!(
+        app.messages()[1]["text"]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("🔀 [karoyqiu/gitea-ntfy] PR #42 已关闭:")
+    );
+    payload["action"] = json!("reopened");
+    assert_eq!(deliver_event(&app, "pull_request", &payload), 204);
+    assert!(
+        app.messages()[2]["text"]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[karoyqiu/gitea-ntfy] PR #42 已重新打开:")
+    );
+}
+
+#[test]
+fn issues_preserve_number_action_source_title_author_and_link() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    let payload: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/issues_opened.json")).unwrap();
+    assert_eq!(deliver_event(&app, "issues", &payload), 204);
+    assert_eq!(
+        app.messages()[0]["text"]["content"],
+        "[karoyqiu/gitea-ntfy] 议题 #7 已创建: App crashes\nApp crashes，作者：roy\nhttps://gitea.example.com/karoyqiu/gitea-ntfy/issues/7"
+    );
+}
+
+#[test]
+fn comments_preserve_commenter_and_link_and_truncate_at_300_unicode_characters() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    let mut payload: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/issue_comment_created.json")).unwrap();
+    assert_eq!(deliver_event(&app, "issue_comment", &payload), 204);
+    assert_eq!(
+        app.messages()[0]["text"]["content"],
+        "[karoyqiu/gitea-ntfy] #7 的评论\nroy 评论：\nI can reproduce this.\nhttps://gitea.example.com/karoyqiu/gitea-ntfy/issues/7#issuecomment-1"
+    );
+    payload["comment"]["body"] = json!("中🦀".repeat(150));
+    assert_eq!(deliver_event(&app, "issue_comment", &payload), 204);
+    assert!(
+        !app.messages()[1]["text"]["content"]
+            .as_str()
+            .unwrap()
+            .contains('…')
+    );
+    payload["comment"]["body"] = json!(format!("{}omit", "中🦀".repeat(150)));
+    assert_eq!(deliver_event(&app, "issue_comment", &payload), 204);
+    let expected = format!(
+        "[karoyqiu/gitea-ntfy] #7 的评论\nroy 评论：\n{}…\nhttps://gitea.example.com/karoyqiu/gitea-ntfy/issues/7#issuecomment-1",
+        "中🦀".repeat(150)
+    );
+    assert_eq!(app.messages()[2]["text"]["content"], expected);
+}
+
+#[test]
+fn releases_mark_priority_preserve_tag_name_and_link_and_truncate_notes() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    let mut payload: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/release_published.json")).unwrap();
+    assert_eq!(deliver_event(&app, "release", &payload), 204);
+    assert_eq!(
+        app.messages()[0]["text"]["content"],
+        "🚀 [karoyqiu/gitea-ntfy] 发布 已发布: v1.2.0\nRelease v1.2.0\nBug fixes\nhttps://gitea.example.com/karoyqiu/gitea-ntfy/releases/tag/v1.2.0"
+    );
+    payload["release"]["body"] = json!(format!("{}omit", "界".repeat(300)));
+    assert_eq!(deliver_event(&app, "release", &payload), 204);
+    assert_eq!(
+        app.messages()[1]["text"]["content"],
+        format!(
+            "🚀 [karoyqiu/gitea-ntfy] 发布 已发布: v1.2.0\nRelease v1.2.0\n{}…\nhttps://gitea.example.com/karoyqiu/gitea-ntfy/releases/tag/v1.2.0",
+            "界".repeat(300)
+        )
+    );
+}
+
+#[test]
+fn workflow_runs_show_result_marker_name_number_branch_trigger_and_link() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    let success: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/workflow_run_success.json")).unwrap();
+    assert_eq!(deliver_event(&app, "workflow_run", &success), 204);
+    assert_eq!(
+        app.messages()[0]["text"]["content"],
+        "✅ [karoyqiu/gitea-ntfy] CI: CI #42 成功\n在 main 上运行“CI”（由 push 触发）-> 成功\nhttps://gitea.example.com/karoyqiu/gitea-ntfy/actions/runs/42"
+    );
+    let mut failure: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/workflow_run_failure.json")).unwrap();
+    assert_eq!(deliver_event(&app, "workflow_run", &failure), 204);
+    assert_eq!(
+        app.messages()[1]["text"]["content"],
+        "❌ [karoyqiu/gitea-ntfy] CI: CI #43 失败\n在 main 上运行“CI”（由 push 触发）-> 失败\nhttps://gitea.example.com/karoyqiu/gitea-ntfy/actions/runs/43"
+    );
+    failure["workflow_run"]["conclusion"] = json!("cancelled");
+    assert_eq!(deliver_event(&app, "workflow_run", &failure), 204);
+    assert!(
+        app.messages()[2]["text"]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("⚙️ [karoyqiu/gitea-ntfy] CI: CI #43 已取消\n")
+    );
+}
+
+#[test]
+fn unknown_events_deliver_repository_event_actor_without_link_or_unsafe_log_fields() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    let mut payload = json!({"repository":{"full_name":"owner/repo"},"sender":{"login":"actor"},"pusher":{"login":"ignored"}});
+    assert_eq!(deliver_event(&app, "star", &payload), 204);
+    assert_eq!(
+        app.messages()[0]["text"]["content"],
+        "[owner/repo] star 事件\nactor 触发了 star"
+    );
+    payload.as_object_mut().unwrap().remove("sender");
+    assert_eq!(deliver_event(&app, "private-event", &payload), 204);
+    assert_eq!(
+        app.messages()[1]["text"]["content"],
+        "[owner/repo] private-event 事件\nignored 触发了 private-event"
+    );
+    assert_eq!(
+        String::from_utf8(app.logs.0.lock().unwrap().clone()).unwrap(),
+        "source=gitea event=unknown result=204\nsource=gitea event=unknown result=204\n"
+    );
+}
+
+#[test]
+fn all_gitea_events_accept_missing_optional_fields_and_log_known_event_names() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for (event, expected) in [
+        (
+            "pull_request",
+            "[未知仓库] PR #? 已更新: \n，作者：未知作者",
+        ),
+        ("issues", "[未知仓库] 议题 #? 已更新: \n，作者：未知作者"),
+        ("issue_comment", "[未知仓库] #? 的评论\n未知评论者 评论：\n"),
+        ("release", "🚀 [未知仓库] 发布 已更新: \n\n"),
+        (
+            "workflow_run",
+            "⚙️ [未知仓库] CI: 工作流 #? 未知\n在 ? 上运行“工作流”（由 ? 触发）-> 未知",
+        ),
+    ] {
+        assert_eq!(deliver_event(&app, event, &json!({})), 204);
+        assert_eq!(app.messages().last().unwrap()["text"]["content"], expected);
+    }
+    assert_eq!(
+        String::from_utf8(app.logs.0.lock().unwrap().clone()).unwrap(),
+        "source=gitea event=pull_request result=204\nsource=gitea event=issues result=204\nsource=gitea event=issue_comment result=204\nsource=gitea event=release result=204\nsource=gitea event=workflow_run result=204\n"
+    );
+}
+
+#[test]
+fn gitea_action_and_workflow_status_labels_use_chinese() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for (action, label) in [
+        ("edited", "已编辑"),
+        ("assigned", "已指派"),
+        ("unassigned", "已取消指派"),
+        ("label_updated", "标签已更新"),
+        ("label_cleared", "标签已清除"),
+        ("synchronized", "已同步"),
+        ("created", "已创建"),
+        ("deleted", "已删除"),
+        ("prereleased", "已预发布"),
+        ("released", "已正式发布"),
+        ("reviewed", "已评审"),
+        ("review_requested", "已请求评审"),
+        ("review_request_removed", "已取消评审请求"),
+        ("ready_for_review", "已准备评审"),
+        ("converted_to_draft", "已转为草稿"),
+    ] {
+        assert_eq!(
+            deliver_event(&app, "issues", &json!({"action":action})),
+            204
+        );
+        assert_eq!(
+            app.messages().last().unwrap()["text"]["content"],
+            format!("[未知仓库] 议题 #? {label}: \n，作者：未知作者")
+        );
+    }
+    for (status, label) in [
+        ("skipped", "已跳过"),
+        ("neutral", "中立"),
+        ("timed_out", "已超时"),
+        ("action_required", "需要处理"),
+        ("stale", "已过期"),
+        ("queued", "排队中"),
+        ("in_progress", "运行中"),
+        ("waiting", "等待中"),
+        ("pending", "待处理"),
+        ("requested", "已请求"),
+        ("completed", "已完成"),
+    ] {
+        assert_eq!(
+            deliver_event(
+                &app,
+                "workflow_run",
+                &json!({"workflow_run":{"status":status}})
+            ),
+            204
+        );
+        assert_eq!(
+            app.messages().last().unwrap()["text"]["content"],
+            format!(
+                "⚙️ [未知仓库] CI: 工作流 #? {label}\n在 ? 上运行“工作流”（由 ? 触发）-> {label}"
+            )
+        );
+    }
+}
+
+#[test]
+fn optional_fields_follow_reference_fallback_precedence() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for (event, payload, expected) in [
+        (
+            "pull_request",
+            json!({"repository":{"full_name":"owner/repo"},"number":null,"pull_request":{"number":9,"title":"原始 title","user":null,"html_url":""},"sender":{"login":"sender"}}),
+            "[owner/repo] PR #9 已更新: 原始 title\n原始 title，作者：sender",
+        ),
+        (
+            "issues",
+            json!({"repository":{"full_name":"owner/repo"},"number":8,"issue":{"number":9,"title":"原始 title","user":{"login":"author"}},"sender":{"login":"ignored"}}),
+            "[owner/repo] 议题 #8 已更新: 原始 title\n原始 title，作者：author",
+        ),
+        (
+            "issue_comment",
+            json!({"repository":{"full_name":"owner/repo"},"number":8,"issue":{"number":null},"comment":{"body":"原始 content"},"sender":{"login":"sender"}}),
+            "[owner/repo] #8 的评论\nsender 评论：\n原始 content",
+        ),
+        (
+            "release",
+            json!({"repository":{"full_name":"owner/repo"},"release":{"name":null,"tag_name":"v2","body":null,"html_url":""}}),
+            "🚀 [owner/repo] 发布 已更新: v2\nv2\n",
+        ),
+        (
+            "workflow_run",
+            json!({"repository":{"full_name":"owner/repo"},"workflow":{"name":"Fallback name"},"workflow_run":{"name":null,"conclusion":null,"status":"in_progress"}}),
+            "⚙️ [owner/repo] CI: Fallback name #? 运行中\n在 ? 上运行“Fallback name”（由 ? 触发）-> 运行中",
+        ),
+        (
+            "new_event",
+            json!({}),
+            "[未知仓库] new_event 事件\n未知触发人 触发了 new_event",
+        ),
+    ] {
+        assert_eq!(deliver_event(&app, event, &payload), 204);
+        assert_eq!(app.messages().last().unwrap()["text"]["content"], expected);
+    }
+    let response = ureq::post(format!("{}/gitea", app.url))
+        .header("X-Gitea-Signature", support::signature(b"{}"))
+        .send(b"{}".as_slice())
+        .unwrap();
+    assert_eq!(response.status(), 204);
+    assert_eq!(
+        app.messages().last().unwrap()["text"]["content"],
+        "[未知仓库] 未知 事件\n未知触发人 触发了 未知"
+    );
+}

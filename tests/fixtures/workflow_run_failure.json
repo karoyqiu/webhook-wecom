@@ -1,0 +1,21 @@
+{
+  "action": "completed",
+  "workflow_run": {
+    "name": "CI",
+    "head_branch": "main",
+    "run_number": 43,
+    "status": "completed",
+    "conclusion": "failure",
+    "event": "push",
+    "html_url": "https://gitea.example.com/karoyqiu/gitea-ntfy/actions/runs/43"
+  },
+  "workflow": {
+    "name": "CI"
+  },
+  "repository": {
+    "full_name": "karoyqiu/gitea-ntfy"
+  },
+  "sender": {
+    "login": "roy"
+  }
+}

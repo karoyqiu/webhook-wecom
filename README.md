@@ -1,6 +1,6 @@
 # webhook-wecom
 
-把外部 webhook 转成企业微信自建应用的纯文本通知，供成员在微信插件中接收。目前支持 Gitea 原生 `push` 事件；其他 Gitea 事件、ntfy、Atlas 和部署材料将在后续 ticket 实现。
+把外部 webhook 转成企业微信自建应用的纯文本通知，供成员在微信插件中接收。目前支持 Gitea 原生 webhook；ntfy、Atlas 和部署材料将在后续 ticket 实现。
 
 ## 本地运行
 
@@ -23,11 +23,19 @@ PowerShell 可使用 `$env:WECOM_CORP_ID = 'your-corp-id'` 等方式逐项设置
 
 默认监听 `127.0.0.1:8080`，可用 `LISTEN_ADDR` 修改。`WECOM_API_BASE` 默认为 `https://qyapi.weixin.qq.com`，测试时可指向假服务器的 HTTP 地址。生产使用官方 HTTPS 地址。公网访问需在服务前配置 HTTPS 反向代理。
 
-## Gitea push
+## Gitea 配置
 
-在 Gitea 仓库添加原生 Gitea webhook：地址 `https://你的域名/gitea`，请求方式 POST，内容类型 JSON，密钥与 `GITEA_WEBHOOK_SECRET` 一致，选择 push 事件。服务校验原始请求体的 HMAC-SHA256 十六进制 `X-Gitea-Signature`。缺少配置返回 404；签名错误或缺失返回 401。未实现的事件暂时返回 400。
+在仓库的「设置 → Webhooks → 添加 Webhook」中选择 **Gitea** 类型，目标地址填写 `https://你的域名/gitea`，请求方式 POST，内容类型 `application/json`，密钥与服务的 `GITEA_WEBHOOK_SECRET` 一致，并启用 webhook。不能选择其他服务的 webhook 格式。
+
+事件可选择「所有事件」，或按需要勾选推送（`push`）、拉取请求（`pull_request`）、议题（`issues`）、评论（`issue_comment`）、发布（`release`）和工作流运行（`workflow_run`，需要 Gitea 支持此事件并启用 Actions）。保存后可用 Gitea 的测试投递及投递记录检查结果。
+
+服务校验原始请求体的 HMAC-SHA256 十六进制 `X-Gitea-Signature`。缺少配置返回 404；签名错误或缺失返回 401。
 
 标题格式为 `[仓库全名] N 次提交 -> 分支`，正文展示前五条提交首行和作者，最后一行保留 `compare_url`（没有链接时省略）。字段选择沿用 [gitea-ntfy 的 push 格式与测试样例](https://github.com/karoyqiu/gitea-ntfy/blob/develop/test/formatters.test.js)。计数取 `commits` 数组长度。
+
+PR 和议题通知展示编号、动作、原始标题和作者，附原文链接；评论展示评论者和内容，附评论链接；发布展示动作、tag、名称和说明，附发布链接。评论及发布说明先截断至 300 个 Unicode 字符，超长附加 `…`。PR 关闭用 🔀，发布用 🚀 标记标题。工作流通知展示工作流名、运行编号、分支、触发方式和结论，附运行链接；成功用 ✅、失败用 ❌、其他状态用 ⚙️。
+
+所有标题包含 `repository.full_name`。其他事件仍投递兜底通知，包含仓库、事件类型和触发人，没有链接。缺少可选字段时使用空值或中文占位，不拒绝请求。服务文案及已知动作、状态使用中文，来源标题、正文、分支等保持原文；未来新增的动作或状态保留原值。
 
 通知按 UTF-8 字节计算，总长不超过 2048 字节，仅截断正文并附加 `…`。如果完整标题、分隔换行和链接已无法容纳，或正文截断后连省略号也放不下，返回 400，不投递。
 
@@ -43,7 +51,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-HTTP 集成测试在进程内运行服务及假企业微信服务器，不需要真实账号。测试包含真实 HTTP 投递、签名、正文限制、UTF-8 截断、token 缓存及一次刷新、下游失败、日志和环境变量启动检查。push 样例来自 gitea-ntfy develop 分支 `test/formatters.test.js` 的 push case。
+HTTP 集成测试在进程内运行服务及假企业微信服务器，不需要真实账号。测试包含全部 Gitea 事件类型和兜底、可选字段、真实 HTTP 投递、签名、正文限制、UTF-8 截断、token 缓存及一次刷新、下游失败、日志和环境变量启动检查。Gitea payload 样例取自 gitea-ntfy 测试，[来源及固定版本](tests/fixtures/README.md)随样例保存。
 
 同步 HTTP 使用 [tiny_http](https://docs.rs/tiny_http/0.12.0/tiny_http/)、[ureq + rustls](https://docs.rs/ureq/3.5.2/ureq/)，无异步运行时或 OpenSSL。GitHub Actions 对 push 和 PR 执行上述检查。
 

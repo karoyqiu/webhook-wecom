@@ -1,0 +1,18 @@
+{
+  "action": "opened",
+  "number": 42,
+  "pull_request": {
+    "title": "Add webhook support",
+    "html_url": "https://gitea.example.com/karoyqiu/gitea-ntfy/pulls/42",
+    "merged": false,
+    "user": {
+      "login": "roy"
+    }
+  },
+  "repository": {
+    "full_name": "karoyqiu/gitea-ntfy"
+  },
+  "sender": {
+    "login": "roy"
+  }
+}

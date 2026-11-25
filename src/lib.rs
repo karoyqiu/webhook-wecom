@@ -40,12 +40,16 @@ impl Service {
                     "/health" => "health",
                     _ => "unknown",
                 };
-                let event =
-                    if source == "gitea" && header(&request, "X-Gitea-Event") == Some("push") {
-                        "push"
-                    } else {
-                        "unknown"
-                    };
+                let event = match (source, header(&request, "X-Gitea-Event")) {
+                    (
+                        "gitea",
+                        Some(
+                            event @ ("push" | "pull_request" | "issues" | "issue_comment"
+                            | "release" | "workflow_run"),
+                        ),
+                    ) => event.to_owned(),
+                    _ => "unknown".into(),
+                };
                 let status = self.handle(&mut request);
                 writeln!(log, "source={source} event={event} result={status}")?;
                 let _ = request.respond(Response::empty(status));
@@ -88,10 +92,15 @@ impl Service {
                 if !payload.is_object() {
                     return 400;
                 }
-                if header(request, "X-Gitea-Event") != Some("push") {
-                    return 400;
-                }
-                let notification = gitea::push(&payload);
+                let notification = match header(request, "X-Gitea-Event") {
+                    Some("push") => gitea::push(&payload),
+                    Some("pull_request") => gitea::pull_request(&payload),
+                    Some("issues") => gitea::issue(&payload),
+                    Some("issue_comment") => gitea::issue_comment(&payload),
+                    Some("release") => gitea::release(&payload),
+                    Some("workflow_run") => gitea::workflow_run(&payload),
+                    event => gitea::fallback(event, &payload),
+                };
                 let Some(content) = notification.render() else {
                     return 400;
                 };

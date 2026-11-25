@@ -1,0 +1,15 @@
+{
+  "action": "published",
+  "release": {
+    "tag_name": "v1.2.0",
+    "name": "Release v1.2.0",
+    "body": "Bug fixes",
+    "html_url": "https://gitea.example.com/karoyqiu/gitea-ntfy/releases/tag/v1.2.0"
+  },
+  "repository": {
+    "full_name": "karoyqiu/gitea-ntfy"
+  },
+  "sender": {
+    "login": "roy"
+  }
+}
