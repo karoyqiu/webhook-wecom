@@ -1,4 +1,5 @@
 use crate::{header, notification::Notification};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tiny_http::Request;
@@ -45,6 +46,59 @@ pub fn authorized(authorization: Option<&str>, token: &str) -> bool {
 
 fn alias<'a>(request: &'a Request, names: &[&'static str]) -> Option<&'a str> {
     names.iter().find_map(|name| header(request, name))
+}
+
+fn decode_header(mut value: &str) -> Option<String> {
+    let mut result = String::new();
+    let mut previous_word = false;
+    while let Some(start) = value.find("=?") {
+        let plain = &value[..start];
+        // RFC 2047 ignores whitespace between adjacent encoded words.
+        if !previous_word || !plain.bytes().all(|b| matches!(b, b' ' | b'\t')) {
+            result.push_str(plain);
+        }
+        let (charset, rest) = value[start + 2..].split_once('?')?;
+        let (encoding, rest) = rest.split_once('?')?;
+        let (encoded, rest) = rest.split_once("?=")?;
+        if !charset.eq_ignore_ascii_case("utf-8") && !charset.eq_ignore_ascii_case("us-ascii") {
+            return None;
+        }
+        if encoded.is_empty() || !encoded.bytes().all(|b| b.is_ascii_graphic() && b != b'?') {
+            return None;
+        }
+        let bytes = if encoding.eq_ignore_ascii_case("b") {
+            STANDARD.decode(encoded).ok()?
+        } else if encoding.eq_ignore_ascii_case("q") {
+            let mut decoded = Vec::new();
+            let mut bytes = encoded.bytes();
+            while let Some(byte) = bytes.next() {
+                decoded.push(match byte {
+                    b'_' => b' ',
+                    b'=' => {
+                        let high = (bytes.next()? as char).to_digit(16)?;
+                        let low = (bytes.next()? as char).to_digit(16)?;
+                        (high * 16 + low) as u8
+                    }
+                    _ => byte,
+                });
+            }
+            decoded
+        } else {
+            return None;
+        };
+        if charset.eq_ignore_ascii_case("us-ascii") && !bytes.is_ascii() {
+            return None;
+        }
+        let decoded = std::str::from_utf8(&bytes).ok()?;
+        if decoded.chars().any(char::is_control) {
+            return None;
+        }
+        result.push_str(decoded);
+        value = rest;
+        previous_word = true;
+    }
+    result.push_str(value);
+    Some(result)
 }
 
 fn priority(value: &str) -> Option<u8> {
@@ -96,18 +150,20 @@ pub fn parse(request: &Request, body: &[u8], topic: &str) -> Option<Notification
             Some(string("click")?),
         ));
     }
-    let title = alias(request, &["X-Title", "Title", "ti", "t"]).unwrap_or("");
-    let priority = alias(request, &["X-Priority", "Priority", "prio", "p"])
-        .map(priority)
-        .unwrap_or(Some(3))?;
-    let tags = alias(request, &["X-Tags", "Tags", "tag", "ta"]).unwrap_or("");
+    let title = decode_header(alias(request, &["X-Title", "Title", "ti", "t"]).unwrap_or(""))?;
+    let priority = match alias(request, &["X-Priority", "Priority", "prio", "p"]) {
+        None => 3,
+        Some(value) => priority(&decode_header(value)?)?,
+    };
+    let tags = decode_header(alias(request, &["X-Tags", "Tags", "tag", "ta"]).unwrap_or(""))?;
+    let click = decode_header(alias(request, &["X-Click", "Click"]).unwrap_or(""))?;
     Some(notification(
         topic,
-        title,
+        &title,
         std::str::from_utf8(body).ok()?,
         priority,
         tags.split(',').map(str::trim),
-        alias(request, &["X-Click", "Click"]),
+        Some(&click),
     ))
 }
 

@@ -84,9 +84,15 @@ impl Harness {
                         serde_json::from_str(&body).unwrap_or(Value::Null),
                     ));
                     let (status, body) = reply(&path);
-                    request
-                        .respond(tiny_http::Response::from_string(body).with_status_code(status))
-                        .unwrap();
+                    let mut response =
+                        tiny_http::Response::from_string(body).with_status_code(status);
+                    if (300..400).contains(&status) {
+                        response.add_header(
+                            tiny_http::Header::from_bytes("Location", "/redirect-destination")
+                                .unwrap(),
+                        );
+                    }
+                    request.respond(response).unwrap();
                 }
             }
         });

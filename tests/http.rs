@@ -164,6 +164,39 @@ fn atlas_logs_allowlisted_event_and_status_without_payload_values() {
 }
 
 #[test]
+fn redirected_token_response_returns_502_without_sending_or_following() {
+    let app = Harness::start_with(Some("gitea-secret"), |_| {
+        (
+            302,
+            json!({"errcode":0,"access_token":"token","expires_in":7200}).to_string(),
+        )
+    });
+    assert_eq!(app.push(&push_fixture()), 502);
+    let received = app.received.lock().unwrap();
+    assert_eq!(received.len(), 1);
+    assert!(received[0].0.starts_with("/cgi-bin/gettoken?"));
+}
+
+#[test]
+fn redirected_send_response_returns_502_without_retrying_or_following() {
+    let app = Harness::start_with(Some("gitea-secret"), |path| {
+        if path.starts_with("/cgi-bin/gettoken?") {
+            (
+                200,
+                json!({"errcode":0,"access_token":"token","expires_in":7200}).to_string(),
+            )
+        } else {
+            (302, json!({"errcode":0}).to_string())
+        }
+    });
+    assert_eq!(app.push(&push_fixture()), 502);
+    let received = app.received.lock().unwrap();
+    assert_eq!(received.len(), 2);
+    assert!(received[0].0.starts_with("/cgi-bin/gettoken?"));
+    assert!(received[1].0.starts_with("/cgi-bin/message/send?"));
+}
+
+#[test]
 fn token_errors_and_malformed_or_http_error_responses_fail_delivery() {
     for (status, body) in [
         (503, "unavailable"),
@@ -760,6 +793,98 @@ fn ntfy_request(app: &Harness, path: &str, body: &[u8], headers: &[(&str, &str)]
         request = request.header(*name, *value);
     }
     request.send(body).unwrap().status().as_u16()
+}
+
+#[test]
+fn ntfy_encoded_titles_deliver_unicode_and_preserve_plain_text() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for (title, expected) in [
+        ("=?UTF-8?B?5aSH5Lu9?=", "备份"),
+        ("=?utf-8?q?=E5=A4=87=E4=BB=BD_done?=", "备份 done"),
+        (
+            "Backup =?UTF-8?B?5aSH?= \t =?UTF-8?Q?=E4=BB=BD?= complete",
+            "Backup 备份 complete",
+        ),
+        ("=?UTF-8?B?5aSH?==?UTF-8?B?5Lu9?=", "备份"),
+        ("ordinary =value? remains", "ordinary =value? remains"),
+    ] {
+        assert_eq!(
+            ntfy_request(
+                &app,
+                "/ntfy/tool",
+                b"body",
+                &[("Authorization", "Bearer ntfy-secret"), ("Title", title)]
+            ),
+            204
+        );
+        assert_eq!(
+            app.messages().last().unwrap()["text"]["content"],
+            format!("[tool] {expected}\nbody")
+        );
+    }
+}
+
+#[test]
+fn ntfy_encoded_header_aliases_decode_before_priority_tags_and_link_mapping() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for (title, priority, tags, click) in [
+        ("X-Title", "X-Priority", "X-Tags", "X-Click"),
+        ("Title", "Priority", "Tags", "Click"),
+        ("ti", "prio", "tag", "Click"),
+        ("t", "p", "ta", "X-Click"),
+    ] {
+        assert_eq!(
+            ntfy_request(
+                &app,
+                "/ntfy/tool",
+                b"body",
+                &[
+                    ("Authorization", "Bearer ntfy-secret"),
+                    (title, "=?UTF-8?B?5aSH5Lu9?="),
+                    (priority, "=?US-ASCII?Q?high?="),
+                    (tags, "=?UTF-8?B?dGFkYQ==?="),
+                    (click, "=?UTF-8?Q?https://example.com/=E5=A4=87=E4=BB=BD?="),
+                ]
+            ),
+            204
+        );
+        assert_eq!(
+            app.messages().last().unwrap()["text"]["content"],
+            "⚠️ 🎉 [tool] 备份\nbody\nhttps://example.com/备份"
+        );
+    }
+}
+
+#[test]
+fn ntfy_invalid_encoded_headers_return_400_without_delivery() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for value in [
+        "=?ISO-8859-1?Q?caf=E9?=",
+        "=?UTF-8?X?text?=",
+        "=?UTF-8?B?bad!?=",
+        "=?UTF-8?Q?bad=G0?=",
+        "=?UTF-8?Q?bad=?=",
+        "=?UTF-8?Q?missing",
+        "=?UTF-8?B?/w==?=",
+        "=?UTF-8?Q?=0D=0A?=",
+        "=?US-ASCII?B?5aSH?=",
+        "=?UTF-8?Q?has space?=",
+        "=?UTF-8?Q??=",
+    ] {
+        for name in ["Title", "Priority", "Tags", "Click"] {
+            assert_eq!(
+                ntfy_request(
+                    &app,
+                    "/ntfy/tool",
+                    b"body",
+                    &[("Authorization", "Bearer ntfy-secret"), (name, value),]
+                ),
+                400,
+                "{name}: {value}"
+            );
+        }
+    }
+    assert!(app.received.lock().unwrap().is_empty());
 }
 
 #[test]

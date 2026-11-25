@@ -151,12 +151,14 @@ HTTP 集成测试在进程内运行服务及假企业微信服务器，不需要
 ```sh
 curl -X POST 'https://你的域名/ntfy/backups' \
   -H "Authorization: Bearer $NTFY_TOKEN" \
-  -H 'Title: Backup complete' \
+  -H 'Title: =?UTF-8?B?5aSH5Lu9?=' \
   -H 'Priority: high' \
   -H 'Tags: tada,heavy_check_mark' \
   -H 'Click: https://example.com/backups' \
   --data-binary 'Backup completed successfully'
 ```
+
+上例标题为「备份」。`tiny_http` 仅接受 ASCII header 值，不能直接发送中文等非 ASCII 字符；请按 [ntfy 标题编码规则](https://docs.ntfy.sh/publish/#message-title) 使用 RFC 2047 encoded-word，或通过下面的 JSON 发送 Unicode。文本格式的标题、优先级、tags、click 及其别名均解码 UTF-8 / US-ASCII 的 B（Base64）和 Q 编码；相邻 encoded-word 之间的空白忽略，普通文本保留。非法编码、不支持的字符集、非法 UTF-8 或解码后的控制字符返回 400，不投递。
 
 JSON 同样发布到 `/ntfy/<主题>`：
 
