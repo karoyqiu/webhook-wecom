@@ -1,0 +1,10 @@
+{
+  "ref": "refs/heads/main",
+  "compare_url": "https://gitea.example.com/karoyqiu/gitea-ntfy/compare/abc...def",
+  "commits": [
+    {"message": "fix: handle empty payload", "author": {"name": "roy"}},
+    {"message": "feat: add push\ndetail", "author": {"name": "roy"}}
+  ],
+  "repository": {"full_name": "karoyqiu/gitea-ntfy"},
+  "pusher": {"login": "roy"}
+}
