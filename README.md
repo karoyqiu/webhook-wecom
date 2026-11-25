@@ -1,6 +1,91 @@
 # webhook-wecom
 
-把外部 webhook 转成企业微信自建应用的纯文本通知，供成员在微信插件中接收。目前支持 Gitea 原生 webhook、ntfy 兼容发布和 MongoDB Atlas 默认 webhook；部署材料将在后续 ticket 实现。
+把外部 webhook 转成企业微信自建应用的纯文本通知，供成员在微信插件中接收。目前支持 Gitea 原生 webhook、ntfy 兼容发布和 MongoDB Atlas 默认 webhook。
+
+## 手工部署到 Linux
+
+目标机器需要 x86_64 Linux、systemd、curl 和 Caddy 2；不需要 Rust、glibc 或容器运行时。先按 [Caddy 官方安装文档](https://caddyserver.com/docs/install)安装包含 systemd 服务的发行版软件包。准备域名（下文以 `webhooks.example.com` 为例），将 DNS 指向目标机器，放行入站 TCP 80/443，并允许服务访问企业微信 HTTPS API。
+
+先在企业微信管理后台创建自建应用，取得企业 ID、应用 AgentId 和 Secret，配置应用可见范围及接收人；需要在个人微信中收取时，还须由成员按企业微信指引绑定微信插件。若应用管理要求 API 可信 IP，填写服务器实际出口公网 IP；本服务不自动配置企业微信后台。
+
+### 下载并安装
+
+在 [GitHub Releases](https://github.com/karoyqiu/webhook-wecom/releases)选择已发布版本，将 `VERSION` 改为该 tag（不能保留占位符）。Release 附带二进制 `webhook-wecom-x86_64-unknown-linux-musl`、其 `SHA256SUMS`、`env.example`、`webhook-wecom.service` 和 `Caddyfile`。以下命令在一个新建的普通用户工作目录执行，后续升级也使用新的工作目录：
+
+```sh
+VERSION='vX.Y.Z'
+mkdir "webhook-wecom-$VERSION"
+cd "webhook-wecom-$VERSION"
+BASE_URL="https://github.com/karoyqiu/webhook-wecom/releases/download/$VERSION"
+for asset in webhook-wecom-x86_64-unknown-linux-musl SHA256SUMS env.example webhook-wecom.service Caddyfile; do
+  curl --fail --location --output "$asset" "$BASE_URL/$asset" || exit 1
+done
+sha256sum --check SHA256SUMS || exit 1
+# 仅在校验成功后继续安装。
+sudo install -o root -g root -m 755 webhook-wecom-x86_64-unknown-linux-musl /usr/local/bin/webhook-wecom
+```
+
+### 配置服务和 HTTPS
+
+创建配置文件后用 `sudoedit` 填写真实值。`env` 必须由 root 所有、权限 600；父目录权限 700，普通用户无法读取。不要将真实配置提交到仓库，也不要把它放进 Caddy 站点目录。systemd 以 root 读取文件后把配置交给动态用户，程序本身不需要读取该文件。
+
+```sh
+sudo install -d -o root -g root -m 700 /etc/webhook-wecom
+sudo install -o root -g root -m 600 env.example /etc/webhook-wecom/env
+sudoedit /etc/webhook-wecom/env
+sudo install -o root -g root -m 644 webhook-wecom.service /etc/systemd/system/webhook-wecom.service
+sudo systemd-analyze verify /etc/systemd/system/webhook-wecom.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now webhook-wecom
+curl --fail http://127.0.0.1:8080/health
+sudo systemctl status webhook-wecom --no-pager
+```
+
+环境文件使用 `KEY=value` 格式，不写 `export`，不会展开 `$变量` 或执行 shell 命令；含特殊字符的值按 systemd `EnvironmentFile` 规则引用。必填变量和来源凭据见下文「本地运行」及 `env.example`。未配置凭据的来源返回 404。默认 `LISTEN_ADDR=127.0.0.1:8080`，无需对公网开放 8080；若更改监听地址，下面健康检查和 Caddy 代理目标也要同步修改。
+
+编辑下载的 `Caddyfile`，将 `webhooks.example.com` 改为真实域名。新机器可直接安装；已有 Caddy 站点时，将示例的站点块合并到现有配置，保留原站点。
+
+```sh
+# 仅适用于新机器；已有配置时先备份并合并站点块。
+sudo install -o root -g root -m 644 Caddyfile /etc/caddy/Caddyfile
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo systemctl enable --now caddy
+sudo systemctl reload caddy
+curl --fail https://webhooks.example.com/health
+sudo journalctl -u webhook-wecom -n 50 --no-pager
+```
+
+Caddy 自动申请和续期 TLS 证书。`/health` 返回 200 仅证明 HTTP 服务运行，不会调用企业微信；按下文配置来源后，用一次真实投递验证应用凭据、接收人及通知。服务以 `DynamicUser=yes` 运行，文件系统只读，失败自动重启；stdout/stderr 由 journald 收集。排错可用 `sudo journalctl -u webhook-wecom -f`。修改 `/etc/webhook-wecom/env` 后执行 `sudo systemctl restart webhook-wecom`。
+
+### 升级与回滚
+
+先在新的工作目录按「下载并安装」中的下载和校验命令获取目标版本，完成校验后再执行以下替换步骤。不要先执行首次安装命令覆盖正在使用的文件。保留旧版本作为回滚文件，以同目录重命名替换可执行文件，避免写入运行中的文件：
+
+```sh
+sudo cp -p /usr/local/bin/webhook-wecom /usr/local/bin/webhook-wecom.previous
+sudo install -o root -g root -m 755 webhook-wecom-x86_64-unknown-linux-musl /usr/local/bin/webhook-wecom.new
+sudo mv /usr/local/bin/webhook-wecom.new /usr/local/bin/webhook-wecom
+sudo systemctl restart webhook-wecom
+curl --fail http://127.0.0.1:8080/health
+sudo journalctl -u webhook-wecom -n 50 --no-pager
+```
+
+升级失败时回滚二进制并重启：
+
+```sh
+sudo install -o root -g root -m 755 /usr/local/bin/webhook-wecom.previous /usr/local/bin/webhook-wecom.new
+sudo mv /usr/local/bin/webhook-wecom.new /usr/local/bin/webhook-wecom
+sudo systemctl restart webhook-wecom
+curl --fail http://127.0.0.1:8080/health
+```
+
+没有持久化数据需要迁移。升级前阅读 Release 说明；如需更改环境文件、unit 或 Caddy 配置，先分别备份，回滚时一并恢复。unit 变更后运行 `systemctl daemon-reload`；Caddy 变更后先 validate 再 reload。重启期间可能有短暂投递失败，来源需自行重试或手动重发。
+
+### 发布流程
+
+维护者将 `v*` tag 推送到 GitHub 后，Actions 在 Ubuntu 上执行 fmt/clippy/test，使用 `cargo build --release --locked --target x86_64-unknown-linux-musl` 构建，再检查静态链接和无 ELF interpreter、在 Alpine 容器请求 `/health`、执行 `systemd-analyze verify` 与 `caddy validate`。全部成功才创建 Release，上传同一份已验证产物；CI 不登录服务器或自动部署。push 和 PR 也执行这些构建与部署材料检查，产物保存在名为 `webhook-wecom-x86_64-unknown-linux-musl` 的 Actions artifact 中。
+
+包含 `-` 的 tag（如 `v0.0.0-spec1-test.1`）标记为预发布，显式不设为 Latest。正式发布使用如 `v0.1.0` 的版本 tag；二进制文件名不含版本号，下载 URL 由 tag 固定版本。
 
 ## 本地运行
 
