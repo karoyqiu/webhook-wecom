@@ -1,6 +1,6 @@
 # webhook-wecom
 
-把外部 webhook 转成企业微信自建应用的纯文本通知，供成员在微信插件中接收。目前支持 Gitea 原生 webhook 和 ntfy 兼容发布；Atlas 和部署材料将在后续 ticket 实现。
+把外部 webhook 转成企业微信自建应用的纯文本通知，供成员在微信插件中接收。目前支持 Gitea 原生 webhook、ntfy 兼容发布和 MongoDB Atlas 默认 webhook；部署材料将在后续 ticket 实现。
 
 ## 本地运行
 
@@ -51,7 +51,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-HTTP 集成测试在进程内运行服务及假企业微信服务器，不需要真实账号。测试包含全部 Gitea 事件类型和兜底、ntfy 文本/JSON/全部 header 别名/优先级/tags/鉴权/主题/非法字段、可选字段、真实 HTTP 投递、签名、正文限制、UTF-8 截断、token 缓存及一次刷新、下游失败、日志和环境变量启动检查。Gitea payload 样例取自 gitea-ntfy 测试，[来源及固定版本](tests/fixtures/README.md)随样例保存。
+HTTP 集成测试在进程内运行服务及假企业微信服务器，不需要真实账号。测试包含全部 Gitea 事件类型和兜底、ntfy 文本/JSON/全部 header 别名/优先级/tags/鉴权/主题/非法字段、Atlas OPEN/CLOSED/可选字段/签名及非法输入、真实 HTTP 投递、正文限制、UTF-8 截断、token 缓存及一次刷新、下游失败、日志和环境变量启动检查。Gitea payload 样例取自 gitea-ntfy 测试，[来源及固定版本](tests/fixtures/README.md)随样例保存。
 
 同步 HTTP 使用 [tiny_http](https://docs.rs/tiny_http/0.12.0/tiny_http/)、[ureq + rustls](https://docs.rs/ureq/3.5.2/ureq/)，无异步运行时或 OpenSSL。GitHub Actions 对 push 和 PR 执行上述检查。
 
@@ -91,3 +91,15 @@ JSON 读取 `title`、`message`、整数 `priority`（1–5）、字符串数组
 仅支持 POST；没有 ntfy 原生根路径 JSON 发布、PUT、订阅或延迟发送接口。主题必须为非空单路径段；允许 URL 百分号编码的 UTF-8，不允许斜杠、反斜杠、空白、控制字符或 `.` / `..`，查询参数不进入主题。请求体、2048 字节通知限制及 204/400/413/502 结果规则与其他来源相同。日志使用固定的 `source=ntfy event=publish`，不记录主题或请求内容。
 
 参考：[ntfy 发布文档](https://docs.ntfy.sh/publish/)、[emoji 列表](https://docs.ntfy.sh/emojis/)。
+
+## MongoDB Atlas 配置
+
+设置服务环境变量 `ATLAS_WEBHOOK_SECRET` 为自行生成的随机密钥。使用 Atlas 的 Organization Owner 或 Project Owner 账号，进入目标项目的 **Project Settings → Integrations → Webhook Settings → Configure**：Webhook URL 填 `https://你的域名/atlas`，Webhook Secret 填相同密钥，Headers Template 和 Body Template 保持默认，保存。随后在项目 **Alerts** 中创建或编辑告警规则，在通知方式中添加 **Webhook** 并保存。仅配置项目集成不会自动让所有告警都使用 webhook。
+
+已于 2026-11-25 对照 [Atlas webhook 官方文档](https://www.mongodb.com/docs/atlas/tutorial/webhook-integration/)核实：Atlas 以 HTTP POST 投递，`X-MMS-Signature` 是使用 Webhook Secret 对**原始请求体字节**计算 HMAC-SHA1 后的 Base64 值；secret 不作为 Bearer 令牌发送。服务解码签名后用 HMAC 的常量时间校验拒绝伪造请求。未配置或空白密钥返回 404，签名缺失、非法或不匹配返回 401，不访问企业微信。
+
+默认 JSON 包含 `status`、`eventTypeName`、`humanReadable`；官方 webhook 样例包含项目 ID `groupId`。完整字段结构见 [Atlas Alerts API](https://www.mongodb.com/docs/api/doc/atlas-admin-api-v2/operation/operation-listgroupalerts)：`groupId` 标识项目，`clusterName` 仅在适用的集群告警中返回，不能假定存在。自定义 body/header 模板可能改变结构或签名头，本服务只支持默认格式。
+
+标题为 `[Atlas <status>] <eventTypeName>（<clusterName>）`，正文保留 `humanReadable`，末行链接为 `https://cloud.mongodb.com/v2/<groupId>#/alerts`。OPEN 和 CLOSED 都投递。缺少或 null 的状态、事件、集群分别显示「未知状态」「未知事件」「未知集群」，描述显示「无告警描述」；缺少、null 或空的 `groupId` 时省略链接。非法 JSON、非对象或上述字段为非字符串且非 null 时返回 400。1 MiB 请求体限制、2048 UTF-8 字节通知限制及 204/413/502 规则与其他来源相同。
+
+Atlas 日志仅记录固定 `source=atlas`、白名单中的 `X-MMS-Event`（如 `alert.open`、`alert.close`，其他值记 `unknown`）和 HTTP 结果，不记录 payload 或密钥。通知方式操作见 [Atlas 告警配置文档](https://www.mongodb.com/docs/atlas/configure-alerts/)。Atlas 不提供手动测试告警；本仓库测试使用假下游，尚未修改或验证真实 Atlas 项目配置。

@@ -3,6 +3,167 @@ use serde_json::json;
 use support::{Harness, push_fixture};
 
 #[test]
+fn atlas_rejects_missing_signature_before_parsing_or_delivery() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    assert_eq!(ntfy_request(&app, "/atlas", b"{", &[]), 401);
+    assert!(app.received.lock().unwrap().is_empty());
+}
+
+#[test]
+fn atlas_open_uses_raw_body_signature_and_delivers_alert_details() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    let body = br#"{"status":"OPEN","eventTypeName":"OUTSIDE_METRIC_THRESHOLD","clusterName":"cluster-0","humanReadable":"Disk usage high","groupId":"5d1b6f8e8c2e4e2d3c4a5b6d"}"#;
+    // Signature independently calculated with .NET HMACSHA1 over these exact bytes.
+    assert_eq!(
+        ntfy_request(
+            &app,
+            "/atlas",
+            body,
+            &[("X-MMS-Signature", "ZZVCixwJ1kZTLH8Mks1fLD3A08Q=")]
+        ),
+        204
+    );
+    let messages = app.messages();
+    assert_eq!(
+        messages[0]["text"]["content"],
+        "[Atlas OPEN] OUTSIDE_METRIC_THRESHOLD（cluster-0）\nDisk usage high\nhttps://cloud.mongodb.com/v2/5d1b6f8e8c2e4e2d3c4a5b6d#/alerts"
+    );
+    assert_eq!(messages[0]["touser"], "roy|jane");
+    assert_eq!(messages[0]["toparty"], "2|3");
+    assert_eq!(messages[0]["totag"], "4");
+}
+
+fn atlas_request(app: &Harness, body: &[u8]) -> u16 {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(b"atlas-secret").unwrap();
+    mac.update(body);
+    ntfy_request(
+        app,
+        "/atlas",
+        body,
+        &[(
+            "X-MMS-Signature",
+            &STANDARD.encode(mac.finalize().into_bytes()),
+        )],
+    )
+}
+
+#[test]
+fn atlas_malformed_json_and_supported_field_shapes_return_400_without_delivery() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for body in [
+        "{",
+        "[]",
+        "null",
+        "42",
+        "\"alert\"",
+        r#"{"status":3}"#,
+        r#"{"clusterName":{}}"#,
+        r#"{"eventTypeName":[]}"#,
+        r#"{"humanReadable":true}"#,
+        r#"{"groupId":5}"#,
+    ] {
+        assert_eq!(atlas_request(&app, body.as_bytes()), 400, "{body}");
+    }
+    assert!(app.received.lock().unwrap().is_empty());
+}
+
+#[test]
+fn atlas_closed_and_missing_or_null_fields_still_deliver_without_empty_link() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for (payload, expected) in [
+        (
+            json!({"status":"CLOSED", "eventTypeName":"NO_PRIMARY", "clusterName":"cluster-0", "humanReadable":"Primary restored", "groupId":"project-id"}),
+            "[Atlas CLOSED] NO_PRIMARY（cluster-0）\nPrimary restored\nhttps://cloud.mongodb.com/v2/project-id#/alerts",
+        ),
+        (
+            json!({"status":"OPEN", "eventTypeName":"BILLING", "humanReadable":"Check billing"}),
+            "[Atlas OPEN] BILLING（未知集群）\nCheck billing",
+        ),
+        (
+            json!({}),
+            "[Atlas 未知状态] 未知事件（未知集群）\n无告警描述",
+        ),
+        (
+            json!({"status":null,"eventTypeName":null,"clusterName":null,"humanReadable":null,"groupId":null}),
+            "[Atlas 未知状态] 未知事件（未知集群）\n无告警描述",
+        ),
+    ] {
+        assert_eq!(atlas_request(&app, payload.to_string().as_bytes()), 204);
+        assert_eq!(app.messages().last().unwrap()["text"]["content"], expected);
+    }
+}
+
+#[test]
+fn atlas_signature_errors_and_disabled_source_never_contact_downstream() {
+    let disabled = Harness::start(None, vec![]);
+    assert_eq!(atlas_request(&disabled, b"{}"), 404);
+    assert!(disabled.received.lock().unwrap().is_empty());
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for signature in [
+        "",
+        "bad",
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAA==",
+        "ZZVCixwJ1kZTLH8Mks1fLD3A08Q=",
+    ] {
+        assert_eq!(
+            ntfy_request(&app, "/atlas", b"{", &[("X-MMS-Signature", signature)]),
+            401,
+            "{signature}"
+        );
+    }
+    assert!(app.received.lock().unwrap().is_empty());
+}
+
+#[test]
+fn atlas_shared_limits_truncate_unicode_body_and_report_delivery_failure() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    let mut payload = json!({"status":"OPEN","eventTypeName":"NO_PRIMARY","clusterName":"cluster-0","humanReadable":"中文🦀".repeat(1000),"groupId":"project-id"});
+    assert_eq!(atlas_request(&app, payload.to_string().as_bytes()), 204);
+    let messages = app.messages();
+    let text = messages[0]["text"]["content"].as_str().unwrap();
+    assert!(text.starts_with("[Atlas OPEN] NO_PRIMARY（cluster-0）\n中文🦀"));
+    assert!(text.ends_with("…\nhttps://cloud.mongodb.com/v2/project-id#/alerts"));
+    assert!(text.len() <= 2048 && text.len() > 2040);
+    payload["eventTypeName"] = json!("x".repeat(2048));
+    assert_eq!(atlas_request(&app, payload.to_string().as_bytes()), 400);
+    assert_eq!(atlas_request(&app, &vec![b'x'; 1024 * 1024 + 1]), 413);
+    assert_eq!(app.messages().len(), 1);
+    let failed = Harness::start(Some("gitea-secret"), vec![json!({"errcode":45009})]);
+    assert_eq!(atlas_request(&failed, b"{}"), 502);
+}
+
+#[test]
+fn atlas_logs_allowlisted_event_and_status_without_payload_values() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    assert_eq!(
+        ntfy_request(
+            &app,
+            "/atlas",
+            b"private payload",
+            &[("X-MMS-Event", "alert.open")]
+        ),
+        401
+    );
+    assert_eq!(
+        ntfy_request(
+            &app,
+            "/atlas",
+            b"private payload",
+            &[("X-MMS-Event", "private-event")]
+        ),
+        401
+    );
+    assert_eq!(
+        String::from_utf8(app.logs.0.lock().unwrap().clone()).unwrap(),
+        "source=atlas event=alert.open result=401\nsource=atlas event=unknown result=401\n"
+    );
+}
+
+#[test]
 fn token_errors_and_malformed_or_http_error_responses_fail_delivery() {
     for (status, body) in [
         (503, "unavailable"),

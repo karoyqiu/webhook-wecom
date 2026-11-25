@@ -62,6 +62,14 @@ fn environment_listener_and_each_recipient_kind_work_and_blank_source_secret_dis
                 .env("LISTEN_ADDR", addr.to_string())
                 .env("GITEA_WEBHOOK_SECRET", " ")
                 .env(
+                    "ATLAS_WEBHOOK_SECRET",
+                    if recipient == "WECOM_TO_USER" {
+                        "atlas-private"
+                    } else {
+                        " "
+                    },
+                )
+                .env(
                     "NTFY_TOKEN",
                     if recipient == "WECOM_TO_USER" {
                         "ntfy-private"
@@ -99,6 +107,18 @@ fn environment_listener_and_each_recipient_kind_work_and_blank_source_secret_dis
                 .unwrap()
                 .status(),
             404
+        );
+        assert_eq!(
+            agent
+                .post(format!("http://{addr}/atlas"))
+                .send("{}")
+                .unwrap()
+                .status(),
+            if recipient == "WECOM_TO_USER" {
+                401
+            } else {
+                404
+            }
         );
         assert_eq!(
             agent

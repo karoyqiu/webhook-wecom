@@ -1,3 +1,4 @@
+mod atlas;
 mod config;
 mod gitea;
 mod notification;
@@ -38,16 +39,29 @@ impl Service {
             if let Some(mut request) = self.server.recv_timeout(Duration::from_millis(25))? {
                 let source = match request.url() {
                     "/gitea" => "gitea",
+                    "/atlas" => "atlas",
                     "/health" => "health",
                     path if ntfy::topic(path).is_some() => "ntfy",
                     _ => "unknown",
                 };
-                let event = match (source, header(&request, "X-Gitea-Event")) {
+                let event_header = if source == "atlas" {
+                    "X-MMS-Event"
+                } else {
+                    "X-Gitea-Event"
+                };
+                let event = match (source, header(&request, event_header)) {
                     (
                         "gitea",
                         Some(
                             event @ ("push" | "pull_request" | "issues" | "issue_comment"
                             | "release" | "workflow_run"),
+                        ),
+                    ) => event.to_owned(),
+                    (
+                        "atlas",
+                        Some(
+                            event @ ("alert.open" | "alert.close" | "alert.update"
+                            | "alert.acknowledge" | "alert.cancel" | "alert.inform"),
                         ),
                     ) => event.to_owned(),
                     ("ntfy", _) => "publish".into(),
@@ -82,6 +96,25 @@ impl Service {
         }
         match (request.method(), request.url()) {
             (&Method::Get, "/health") => 200,
+            (&Method::Post, "/atlas") => {
+                let Some(secret) = &self.config.atlas_secret else {
+                    return 404;
+                };
+                if !atlas::signature_valid(&body, header(request, "X-MMS-Signature"), secret) {
+                    return 401;
+                }
+                let Some(notification) = atlas::parse(&body) else {
+                    return 400;
+                };
+                let Some(content) = notification.render() else {
+                    return 400;
+                };
+                if self.wecom.deliver(&self.config, &content).is_ok() {
+                    204
+                } else {
+                    502
+                }
+            }
             (&Method::Post, "/gitea") => {
                 let Some(secret) = &self.config.gitea_secret else {
                     return 404;
@@ -133,7 +166,7 @@ impl Service {
                     502
                 }
             }
-            (_, "/health" | "/gitea") => 405,
+            (_, "/health" | "/gitea" | "/atlas") => 405,
             _ => 404,
         }
     }

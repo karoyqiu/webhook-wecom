@@ -64,6 +64,7 @@ impl Harness {
             to_party: "2|3".into(),
             to_tag: "4".into(),
             gitea_secret: secret.map(str::to_owned),
+            atlas_secret: secret.map(|_| "atlas-secret".into()),
             ntfy_token: secret.map(|_| "ntfy-secret".into()),
         };
         let service = Service::new(config).unwrap();
