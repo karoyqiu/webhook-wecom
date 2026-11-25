@@ -1,0 +1,21 @@
+{
+  "action": "created",
+  "issue": {
+    "number": 7,
+    "title": "App crashes",
+    "html_url": "https://gitea.example.com/karoyqiu/gitea-ntfy/issues/7"
+  },
+  "comment": {
+    "body": "I can reproduce this.",
+    "html_url": "https://gitea.example.com/karoyqiu/gitea-ntfy/issues/7#issuecomment-1",
+    "user": {
+      "login": "roy"
+    }
+  },
+  "repository": {
+    "full_name": "karoyqiu/gitea-ntfy"
+  },
+  "sender": {
+    "login": "roy"
+  }
+}

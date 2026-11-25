@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  linux-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools binutils file
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Check static executable and prepare release assets
+        run: |
+          mkdir dist
+          cp target/x86_64-unknown-linux-musl/release/webhook-wecom dist/webhook-wecom-x86_64-unknown-linux-musl
+          file dist/webhook-wecom-x86_64-unknown-linux-musl | tee /tmp/binary-type
+          grep -Eq 'statically linked|static-pie linked' /tmp/binary-type
+          readelf -l dist/webhook-wecom-x86_64-unknown-linux-musl > /tmp/binary-headers
+          if grep -q INTERP /tmp/binary-headers; then
+            echo 'Unexpected ELF interpreter in release binary' >&2
+            exit 1
+          fi
+          cp deploy/webhook-wecom.service deploy/Caddyfile dist/
+          cp .env.example dist/env.example
+          cd dist
+          sha256sum webhook-wecom-x86_64-unknown-linux-musl > SHA256SUMS
+      - name: Smoke test on Alpine with fake credentials
+        run: |
+          docker run --rm -v "$PWD/dist:/release:ro" \
+            -e WECOM_CORP_ID=smoke -e WECOM_AGENT_ID=1 \
+            -e WECOM_SECRET=smoke -e WECOM_TO_USER=smoke \
+            alpine:3.22 sh -ec '
+              /release/webhook-wecom-x86_64-unknown-linux-musl &
+              server_pid=$!
+              trap "kill $server_pid 2>/dev/null || true" EXIT
+              for attempt in 1 2 3 4 5; do
+                wget -q -O /dev/null http://127.0.0.1:8080/health && exit 0
+                sleep 1
+              done
+              exit 1
+            '
+      - name: Validate systemd unit with installed executable
+        run: |
+          sudo install -m 755 dist/webhook-wecom-x86_64-unknown-linux-musl /usr/local/bin/webhook-wecom
+          systemd-analyze verify deploy/webhook-wecom.service
+      - name: Validate Caddy example
+        run: docker run --rm -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - uses: actions/upload-artifact@v7
+        with:
+          name: webhook-wecom-x86_64-unknown-linux-musl
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [check, linux-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: webhook-wecom-x86_64-unknown-linux-musl
+          path: dist
+      - name: Publish validated release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          flags=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            flags=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" dist/* \
+            --verify-tag --title "$RELEASE_TAG" --generate-notes "${flags[@]}"
