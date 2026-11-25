@@ -588,3 +588,345 @@ fn optional_fields_follow_reference_fallback_precedence() {
         "[未知仓库] 未知 事件\n未知触发人 触发了 未知"
     );
 }
+
+fn ntfy_request(app: &Harness, path: &str, body: &[u8], headers: &[(&str, &str)]) -> u16 {
+    let agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
+    let mut request = agent.post(format!("{}{path}", app.url));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request.send(body).unwrap().status().as_u16()
+}
+
+#[test]
+fn ntfy_text_headers_deliver_title_body_link_and_recipients() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    assert_eq!(
+        ntfy_request(
+            &app,
+            "/ntfy/backups",
+            "备份完成🦀".as_bytes(),
+            &[
+                ("Authorization", "Bearer ntfy-secret"),
+                ("Title", "Backup"),
+                ("Click", "https://example.com/backup")
+            ]
+        ),
+        204
+    );
+    let messages = app.messages();
+    assert_eq!(
+        messages[0]["text"]["content"],
+        "[backups] Backup\n备份完成🦀\nhttps://example.com/backup"
+    );
+    assert_eq!(messages[0]["touser"], "roy|jane");
+    assert_eq!(messages[0]["toparty"], "2|3");
+    assert_eq!(messages[0]["totag"], "4");
+}
+
+#[test]
+fn ntfy_all_header_aliases_and_named_priorities_map_tags() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for (title, priority, tags, click) in [
+        ("X-Title", "X-Priority", "X-Tags", "X-Click"),
+        ("Title", "Priority", "Tags", "Click"),
+        ("ti", "prio", "tag", "Click"),
+        ("t", "p", "ta", "X-Click"),
+    ] {
+        assert_eq!(
+            ntfy_request(
+                &app,
+                "/ntfy/tool",
+                b"body",
+                &[
+                    ("Authorization", "Bearer ntfy-secret"),
+                    (title, "Alert"),
+                    (priority, "high"),
+                    (tags, "tada, unknown, crab, japan"),
+                    (click, "https://example.com")
+                ]
+            ),
+            204
+        );
+        assert_eq!(
+            app.messages().last().unwrap()["text"]["content"],
+            "⚠️ 🎉 🦀 🗾 [tool] Alert\nbody\nhttps://example.com"
+        );
+    }
+    for (priority, marker) in [
+        ("5", "🚨 "),
+        ("max", "🚨 "),
+        ("urgent", "🚨 "),
+        ("4", "⚠️ "),
+        ("3", ""),
+        ("default", ""),
+        ("2", ""),
+        ("low", ""),
+        ("1", ""),
+        ("min", ""),
+    ] {
+        assert_eq!(
+            ntfy_request(
+                &app,
+                "/ntfy/tool",
+                b"body",
+                &[
+                    ("Authorization", "Bearer ntfy-secret"),
+                    ("Priority", priority)
+                ]
+            ),
+            204
+        );
+        assert_eq!(
+            app.messages().last().unwrap()["text"]["content"],
+            format!("{marker}[tool]\nbody")
+        );
+    }
+}
+
+#[test]
+fn ntfy_json_ignores_unsupported_fields_and_uses_topic_from_path() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    let body = json!({"topic":"ignored", "title":"故障", "message":"中文🦀", "priority":5,
+        "tags":["rotating_light", "unknown", "tada"], "click":"https://example.com/status",
+        "attach": {"anything":true}, "actions":false, "delay":[1], "markdown":true});
+    assert_eq!(
+        ntfy_request(
+            &app,
+            "/ntfy/tool",
+            body.to_string().as_bytes(),
+            &[
+                ("Authorization", "Bearer ntfy-secret"),
+                ("Content-Type", "Application/JSON; charset=utf-8"),
+                ("Title", "ignored"),
+                ("Priority", "bad")
+            ]
+        ),
+        204
+    );
+    assert_eq!(
+        app.messages()[0]["text"]["content"],
+        "🚨 🚨 🎉 [tool] 故障\n中文🦀\nhttps://example.com/status"
+    );
+    assert_eq!(
+        ntfy_request(
+            &app,
+            "/ntfy/tool",
+            b"{}",
+            &[
+                ("Authorization", "Bearer ntfy-secret"),
+                ("Content-Type", "application/json")
+            ]
+        ),
+        204
+    );
+    assert_eq!(app.messages()[1]["text"]["content"], "[tool]\n");
+}
+
+#[test]
+fn ntfy_topic_decodes_utf8_strips_query_and_rejects_invalid_segments() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    let auth = [("Authorization", "Bearer ntfy-secret")];
+    assert_eq!(
+        ntfy_request(&app, "/ntfy/%E5%A4%87%E4%BB%BD?token=private", b"ok", &auth),
+        204
+    );
+    assert_eq!(app.messages()[0]["text"]["content"], "[备份]\nok");
+    for path in [
+        "/ntfy/",
+        "/ntfy/a/b",
+        "/ntfy/a/",
+        "/ntfy/a%2Fb",
+        "/ntfy/a%5Cb",
+        "/ntfy/%FF",
+        "/ntfy/%",
+        "/ntfy/%0A",
+        "/ntfy/%20",
+        "/ntfy/%2e%2e",
+    ] {
+        assert_eq!(ntfy_request(&app, path, b"body", &auth), 404, "{path}");
+    }
+    assert_eq!(app.messages().len(), 1);
+}
+
+#[test]
+fn ntfy_logs_only_fixed_source_event_and_status() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    assert_eq!(
+        ntfy_request(
+            &app,
+            "/ntfy/private-topic?token=private-query",
+            b"private-body",
+            &[
+                ("Authorization", "Bearer ntfy-secret"),
+                ("Title", "private-title"),
+                ("X-Gitea-Event", "private-event")
+            ]
+        ),
+        204
+    );
+    assert_eq!(
+        String::from_utf8(app.logs.0.lock().unwrap().clone()).unwrap(),
+        "source=ntfy event=publish result=204\n"
+    );
+}
+
+#[test]
+fn ntfy_credentials_fail_closed_and_other_methods_and_root_are_not_publish_apis() {
+    let disabled = Harness::start(None, vec![]);
+    assert_eq!(
+        ntfy_request(
+            &disabled,
+            "/ntfy/tool",
+            b"ok",
+            &[("Authorization", "Bearer ntfy-secret")]
+        ),
+        404
+    );
+    assert!(disabled.received.lock().unwrap().is_empty());
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for authorization in [
+        None,
+        Some("Bearer wrong"),
+        Some("Basic ntfy-secret"),
+        Some("Bearer ntfy-secret-extra"),
+        Some("Bearer "),
+    ] {
+        let headers: Vec<_> = authorization
+            .map(|value| ("Authorization", value))
+            .into_iter()
+            .collect();
+        assert_eq!(ntfy_request(&app, "/ntfy/tool", b"{", &headers), 401);
+    }
+    assert_eq!(
+        ntfy_request(&app, "/", b"{}", &[("Authorization", "Bearer ntfy-secret")]),
+        404
+    );
+    let agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
+    assert_eq!(
+        agent
+            .put(format!("{}/ntfy/tool", app.url))
+            .header("Authorization", "Bearer ntfy-secret")
+            .send("ok")
+            .unwrap()
+            .status(),
+        404
+    );
+    assert!(app.received.lock().unwrap().is_empty());
+}
+
+#[test]
+fn ntfy_malformed_supported_fields_and_invalid_utf8_return_400_without_delivery() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    for body in [
+        "{",
+        "null",
+        "[]",
+        "3",
+        r#"{"title":3}"#,
+        r#"{"message":null}"#,
+        r#"{"click":false}"#,
+        r#"{"tags":"warning"}"#,
+        r#"{"tags":[3]}"#,
+        r#"{"priority":"high"}"#,
+        r#"{"priority":0}"#,
+        r#"{"priority":6}"#,
+        r#"{"priority":-1}"#,
+        r#"{"priority":4.5}"#,
+    ] {
+        assert_eq!(
+            ntfy_request(
+                &app,
+                "/ntfy/tool",
+                body.as_bytes(),
+                &[
+                    ("Authorization", "Bearer ntfy-secret"),
+                    ("Content-Type", "application/json")
+                ]
+            ),
+            400,
+            "{body}"
+        );
+    }
+    assert_eq!(
+        ntfy_request(
+            &app,
+            "/ntfy/tool",
+            b"\xff",
+            &[("Authorization", "Bearer ntfy-secret")]
+        ),
+        400
+    );
+    assert_eq!(
+        ntfy_request(
+            &app,
+            "/ntfy/tool",
+            b"ok",
+            &[("Authorization", "Bearer ntfy-secret"), ("Priority", "bad")]
+        ),
+        400
+    );
+    assert!(app.received.lock().unwrap().is_empty());
+}
+
+#[test]
+fn ntfy_shared_limits_preserve_title_link_and_unicode_and_report_delivery_failure() {
+    let app = Harness::start(Some("gitea-secret"), vec![]);
+    let headers = [
+        ("Authorization", "Bearer ntfy-secret"),
+        ("Content-Type", "application/json"),
+    ];
+    let body =
+        json!({"title":"备份🦀", "message":"中文🦀".repeat(1000), "click":"https://example.com"});
+    assert_eq!(
+        ntfy_request(&app, "/ntfy/tool", body.to_string().as_bytes(), &headers),
+        204
+    );
+    let messages = app.messages();
+    let content = messages[0]["text"]["content"].as_str().unwrap();
+    assert!(content.starts_with("[tool] 备份🦀\n中文🦀"));
+    assert!(content.ends_with("…\nhttps://example.com"));
+    assert!(content.len() <= 2048 && content.len() > 2044);
+    assert!(!content.contains('\u{fffd}'));
+    let exact = json!({"message":"x".repeat(2041)});
+    assert_eq!(
+        ntfy_request(&app, "/ntfy/tool", exact.to_string().as_bytes(), &headers),
+        204
+    );
+    assert_eq!(
+        app.messages()[1]["text"]["content"].as_str().unwrap().len(),
+        2048
+    );
+    for body in [
+        json!({"title":"x".repeat(2048)}),
+        json!({"click":"x".repeat(2048)}),
+        json!({"message":"xxx", "click":"x".repeat(2039)}),
+    ] {
+        assert_eq!(
+            ntfy_request(&app, "/ntfy/tool", body.to_string().as_bytes(), &headers),
+            400
+        );
+    }
+    let auth = [
+        ("Authorization", "Bearer ntfy-secret"),
+        ("Actions", "unsupported"),
+        ("Delay", "1h"),
+        ("Attach", "https://example.com/a"),
+    ];
+    assert_eq!(
+        ntfy_request(&app, "/ntfy/tool", &vec![b'x'; 1024 * 1024], &auth),
+        204
+    );
+    assert_eq!(
+        ntfy_request(&app, "/ntfy/tool", &vec![b'x'; 1024 * 1024 + 1], &auth),
+        413
+    );
+    let failed = Harness::start(Some("gitea-secret"), vec![json!({"errcode":45009})]);
+    assert_eq!(ntfy_request(&failed, "/ntfy/tool", b"ok", &auth), 502);
+}

@@ -10,6 +10,7 @@ pub struct Config {
     pub to_party: String,
     pub to_tag: String,
     pub gitea_secret: Option<String>,
+    pub ntfy_token: Option<String>,
 }
 
 impl Config {
@@ -54,6 +55,7 @@ impl Config {
             to_party,
             to_tag,
             gitea_secret: optional("GITEA_WEBHOOK_SECRET"),
+            ntfy_token: optional("NTFY_TOKEN"),
         })
     }
 }

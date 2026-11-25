@@ -1,6 +1,7 @@
 mod config;
 mod gitea;
 mod notification;
+mod ntfy;
 mod wecom;
 pub use config::Config;
 use std::{
@@ -38,6 +39,7 @@ impl Service {
                 let source = match request.url() {
                     "/gitea" => "gitea",
                     "/health" => "health",
+                    path if ntfy::topic(path).is_some() => "ntfy",
                     _ => "unknown",
                 };
                 let event = match (source, header(&request, "X-Gitea-Event")) {
@@ -48,6 +50,7 @@ impl Service {
                             | "release" | "workflow_run"),
                         ),
                     ) => event.to_owned(),
+                    ("ntfy", _) => "publish".into(),
                     _ => "unknown".into(),
                 };
                 let status = self.handle(&mut request);
@@ -100,6 +103,26 @@ impl Service {
                     Some("release") => gitea::release(&payload),
                     Some("workflow_run") => gitea::workflow_run(&payload),
                     event => gitea::fallback(event, &payload),
+                };
+                let Some(content) = notification.render() else {
+                    return 400;
+                };
+                if self.wecom.deliver(&self.config, &content).is_ok() {
+                    204
+                } else {
+                    502
+                }
+            }
+            (&Method::Post, path) if ntfy::topic(path).is_some() => {
+                let Some(token) = &self.config.ntfy_token else {
+                    return 404;
+                };
+                if !ntfy::authorized(header(request, "Authorization"), token) {
+                    return 401;
+                }
+                let topic = ntfy::topic(path).expect("validated topic");
+                let Some(notification) = ntfy::parse(request, &body, &topic) else {
+                    return 400;
                 };
                 let Some(content) = notification.render() else {
                     return 400;

@@ -1,6 +1,6 @@
 # webhook-wecom
 
-把外部 webhook 转成企业微信自建应用的纯文本通知，供成员在微信插件中接收。目前支持 Gitea 原生 webhook；ntfy、Atlas 和部署材料将在后续 ticket 实现。
+把外部 webhook 转成企业微信自建应用的纯文本通知，供成员在微信插件中接收。目前支持 Gitea 原生 webhook 和 ntfy 兼容发布；Atlas 和部署材料将在后续 ticket 实现。
 
 ## 本地运行
 
@@ -51,8 +51,43 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-HTTP 集成测试在进程内运行服务及假企业微信服务器，不需要真实账号。测试包含全部 Gitea 事件类型和兜底、可选字段、真实 HTTP 投递、签名、正文限制、UTF-8 截断、token 缓存及一次刷新、下游失败、日志和环境变量启动检查。Gitea payload 样例取自 gitea-ntfy 测试，[来源及固定版本](tests/fixtures/README.md)随样例保存。
+HTTP 集成测试在进程内运行服务及假企业微信服务器，不需要真实账号。测试包含全部 Gitea 事件类型和兜底、ntfy 文本/JSON/全部 header 别名/优先级/tags/鉴权/主题/非法字段、可选字段、真实 HTTP 投递、签名、正文限制、UTF-8 截断、token 缓存及一次刷新、下游失败、日志和环境变量启动检查。Gitea payload 样例取自 gitea-ntfy 测试，[来源及固定版本](tests/fixtures/README.md)随样例保存。
 
 同步 HTTP 使用 [tiny_http](https://docs.rs/tiny_http/0.12.0/tiny_http/)、[ureq + rustls](https://docs.rs/ureq/3.5.2/ureq/)，无异步运行时或 OpenSSL。GitHub Actions 对 push 和 PR 执行上述检查。
 
 企业微信官方参考：[发送应用消息](https://developer.work.weixin.qq.com/document/path/90236)、[获取 access_token](https://developer.work.weixin.qq.com/document/path/91039)、[全局错误码](https://developer.work.weixin.qq.com/document/path/90313)。实现期间官方页面无法访问，2048 字节规则及 40014/42001 处理遵循 spec #1，尚未用真实企业微信账号验证。
+
+## ntfy 发布
+
+设置服务环境变量 `NTFY_TOKEN` 为自行生成的随机令牌。未配置或空白时 `/ntfy/<主题>` 返回 404；缺少或错误的 `Authorization: Bearer <NTFY_TOKEN>` 返回 401，不投递。发布方配置完整地址 `https://你的域名/ntfy/backups` 和 Bearer 令牌。主题只用于标题，不改变接收人。
+
+纯文本正文加 header：
+
+```sh
+curl -X POST 'https://你的域名/ntfy/backups' \
+  -H "Authorization: Bearer $NTFY_TOKEN" \
+  -H 'Title: Backup complete' \
+  -H 'Priority: high' \
+  -H 'Tags: tada,heavy_check_mark' \
+  -H 'Click: https://example.com/backups' \
+  --data-binary 'Backup completed successfully'
+```
+
+JSON 同样发布到 `/ntfy/<主题>`：
+
+```sh
+curl -X POST 'https://你的域名/ntfy/backups' \
+  -H "Authorization: Bearer $NTFY_TOKEN" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  --data-binary '{"title":"备份失败","message":"请检查备份任务","priority":5,"tags":["warning"],"click":"https://example.com/backups"}'
+```
+
+JSON 读取 `title`、`message`、整数 `priority`（1–5）、字符串数组 `tags` 和 `click`。缺省值为空内容及优先级 3；支持字段类型错误、非法 JSON 或非 UTF-8 文本返回 400。Content-Type 忽略大小写并允许 charset 参数。JSON 中 `topic` 被忽略，主题始终取 URL；JSON 发布不读取文本格式的标题等 header。
+
+文本格式支持全部常用别名：`X-Title` / `Title` / `ti` / `t`，`X-Priority` / `Priority` / `prio` / `p`，`X-Tags` / `Tags` / `tag` / `ta`，`X-Click` / `Click`。header 名忽略大小写；同组同时存在时按此顺序取第一个。优先级支持 1–5 及 `min`、`low`、`default`、`high`、`max` / `urgent`。tags 用逗号分隔。
+
+标题为 `[主题] 标题`，无标题时只有 `[主题]`。优先级 4 加 ⚠️，5 加 🚨；可识别的 tags 依次转为 emoji 放在标题前，未知 tag 忽略。emoji 对照表完整固定在仓库中，[来源与许可证](src/data/README.md)随数据保存。附件、动作按钮、延迟、markdown 等不支持字段或 header 均忽略，仍立即投递纯文本。
+
+仅支持 POST；没有 ntfy 原生根路径 JSON 发布、PUT、订阅或延迟发送接口。主题必须为非空单路径段；允许 URL 百分号编码的 UTF-8，不允许斜杠、反斜杠、空白、控制字符或 `.` / `..`，查询参数不进入主题。请求体、2048 字节通知限制及 204/400/413/502 结果规则与其他来源相同。日志使用固定的 `source=ntfy event=publish`，不记录主题或请求内容。
+
+参考：[ntfy 发布文档](https://docs.ntfy.sh/publish/)、[emoji 列表](https://docs.ntfy.sh/emojis/)。
